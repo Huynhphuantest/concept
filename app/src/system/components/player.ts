@@ -1,10 +1,9 @@
 import * as THREE from 'three';
 import { Input } from '../Input';
-import { Physic, Transform } from "./core";
+import { Physic, Renderer, Transform } from "./core";
 import { Component, System } from "../ECS";
 import { camera } from "../../main";
 import { Character } from './character';
-import { toVec3 } from '../../util';
 
 export class PlayerController extends Component {
   static requires = [Physic, Character];
@@ -14,8 +13,8 @@ export class PlayerController extends Component {
   pitch = 0;
   readonly dragFall = -5;
   readonly cameraOffset = new THREE.Vector3(0, 3, 7);
-  readonly cameraPosLerp = 1;
-  readonly cameraRotLerp = 1;
+  readonly cameraPosLerp = 0.3;
+  readonly cameraRotLerp = 0.4;
   private targetCamPos = new THREE.Vector3();
   private targetCamRot = new THREE.Quaternion();
   constructor() {
@@ -27,10 +26,10 @@ export class PlayerController extends Component {
 
     this.character.health.bind(document.getElementById("health-container")!);
 
-    //LMB
-    Input.onPress("Enter", () => { this.character.lmb() })
-    // Jump
-    Input.onPress("Space", () => { this.character.jump() });
+    Input.onPress("Digit1", () => this.character.useSkill(0));
+    Input.onPress("Digit2", () => this.character.useSkill(1));
+    Input.onPress("Digit3", () => this.character.useSkill(2));
+    Input.onPress("Digit4", () => this.character.useSkill(3));
     // Lockon
     Input.onPress("KeyL", () => {
       if(this.character.locked !== null) {
@@ -40,7 +39,7 @@ export class PlayerController extends Component {
       const allTargets = System.query(Character);
       let closest:number|undefined = undefined;
       let closestDist = -1;
-      const facing = this.character.getFacing();
+      const facing = this.character.getTarget().normalize();
       const pos = System.getComponent(this.entity, Transform).position;
       allTargets.forEach(e => {
         if(e === this.entity) return;
@@ -72,7 +71,7 @@ export class PlayerController extends Component {
   }
   followPlayer():THREE.Quaternion {
     // Follow player
-    const pos = toVec3(this.physic.getPosition());
+    const pos = System.getComponent(this.entity, Renderer).mesh.position;
     const offset = this.cameraOffset.clone();
     const camQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(this.pitch, this.yaw, 0, 'YXZ'));
     this.targetCamPos = pos.clone().add(offset.clone().applyQuaternion(camQuat));
@@ -83,25 +82,25 @@ export class PlayerController extends Component {
   }
   followTarget():THREE.Quaternion {
     const locked = this.character.locked!;
-    const lockedPos = toVec3(System.getComponent(locked, Physic).getPosition());
-    const pos = toVec3(this.physic.getPosition());
-    const up = new THREE.Vector3(0, 1, 0); // World up
-    const targetQuat = new THREE.Quaternion().setFromEuler(
-      new THREE.Euler(0, new THREE.Euler().setFromQuaternion(
-        new THREE.Quaternion().setFromRotationMatrix(
-          new THREE.Matrix4().lookAt(pos, lockedPos, up)
-      ), 'YXZ').y)
+    const target = System.getComponent(locked, Renderer).mesh.position;
+    const pos = System.getComponent(this.entity, Renderer).mesh.position;
+    const up = new THREE.Vector3(0, 1, 0);
+    const direction = target.clone().sub(pos);
+    direction.y = 0;
+    direction.normalize();
+    const targetQuat = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0,0,1),
+      direction
     );
-    const offset = this.cameraOffset.clone().applyQuaternion(targetQuat);
-    camera.position.lerp(new THREE.Vector3(
-      pos.x + (offset.x - 3),
-      pos.y + offset.y,
-      pos.z + offset.z,
-    ), this.cameraPosLerp);
+    const offset = new THREE.Vector3(
+      -2,3,-7
+    ).clone().applyQuaternion(targetQuat)
+    const cameraPos = offset.add(pos);
     const cameraQuat = new THREE.Quaternion().setFromRotationMatrix(
-      new THREE.Matrix4().lookAt(camera.position, lockedPos, up)
+      new THREE.Matrix4().lookAt(camera.position, target, up)
     );
-    camera.quaternion.slerp(cameraQuat, this.cameraRotLerp);
+    this.targetCamPos = cameraPos;
+    this.targetCamRot = cameraQuat;
     return targetQuat;
   }
   updateSkillDisplay() {
@@ -117,7 +116,10 @@ export class PlayerController extends Component {
     camera.quaternion.slerp(this.targetCamRot, this.cameraRotLerp);
     this.physic.setRotation(quat);
 
+    if (Input.has("Space")) this.character.jump();
+    if (Input.has("Enter")) this.character.lmb();
     // WASD movement
+    if (Input.has("ControlLeft")) this.character.isRuning = true;
     const input = new THREE.Vector3();
     if (Input.has("KeyW")) input.z += 1;
     if (Input.has("KeyS")) input.z -= 1;

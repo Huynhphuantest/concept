@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import * as RAPIER from '@dimforge/rapier3d';
 import { Component, System } from "../ECS";
-import { scene, world } from '../../main';
-import { cloneQuat, cloneVec3, fromQuat, fromVec3, toQuat, toVec3 } from '../../util';
+import { Lifecycle, scene, Time, world } from '../../main';
+import { cloneQuat, cloneVec3, fromQuat, fromVec3, toQuat, toVec3, vec3 } from '../../util';
+type Vec3 = {x:number, y:number, z:number};
+type Quat = {x:number, y:number, z:number, w:number};
 
 export class GameObject extends Component {}
 
@@ -132,110 +134,182 @@ export class Physic extends Component {
   }
 
   // ---- Position / Rotation
-  setPosition(pos: { x: number; y: number; z: number }) {
+  setPosition(pos: Vec3) {
     this.body.setTranslation(pos, true);
     this.wake();
   }
-  addPosition(pos: { x: number; y: number; z: number }) {
+  addPosition(pos: Vec3) {
     const p = this.body.translation();
     this.body.setTranslation({ x: p.x + pos.x, y: p.y + pos.y, z: p.z + pos.z }, true);
   }
-
-  setRotation(rot: { x: number; y: number; z: number; w: number }) {
+  setRotation(rot: Quat) {
     this.body.setRotation(rot, true);
     this.wake();
   }
-
   getPosition() {
     return cloneVec3(this.body.translation());
   }
-
   getRotation() {
     return cloneQuat(this.body.rotation());
   }
-
   // ---- Velocity
-  setVelocity(v: { x: number; y: number; z: number }) {
+  setVelocity(v: Vec3) {
     this.body.setLinvel(v, true);
     this.wake();
   }
-
-  addVelocity(v: { x: number; y: number; z: number }) {
+  addVelocity(v: Vec3) {
     const lv = this.body.linvel();
     this.setVelocity({ x: lv.x + v.x, y: lv.y + v.y, z: lv.z + v.z });
   }
-
   getVelocity() {
     return cloneVec3(this.body.linvel());
   }
-
   // ---- Angular
-  setAngularVelocity(v: { x: number; y: number; z: number }) {
+  setAngularVelocity(v: Vec3) {
     this.body.setAngvel(v, true);
     this.wake();
   }
-
-  addAngularVelocity(v: { x: number; y: number; z: number }) {
+  addAngularVelocity(v: Vec3) {
     const av = this.body.angvel();
     this.setAngularVelocity({ x: av.x + v.x, y: av.y + v.y, z: av.z + v.z });
   }
-
   getAngularVelocity() {
     return cloneVec3(this.body.angvel());
   }
-
   // ---- Forces / Impulses
-  addForce(f: { x: number; y: number; z: number }) {
+  addForce(f: Vec3) {
     this.body.addForce(f, true);
   }
-
-  addImpulse(f: { x: number; y: number; z: number }) {
+  addImpulse(f: Vec3) {
     this.body.applyImpulse(f, true);
   }
-
   // ---- Misc
   wake() {
     this.body.wakeUp();
   }
-
   sleep() {
     this.body.sleep();
   }
-
   isSleeping() {
     return this.body.isSleeping();
   }
-
   setMass(mass: number) {
     this.body.setAdditionalMass(mass, true);
   }
-
   setFriction(v: number) {
     this.collider.setFriction(v);
   }
-
   setRestitution(v: number) {
     this.collider.setRestitution(v);
   }
-
   setDamping(linear: number, angular: number) {
     this.body.setLinearDamping(linear);
     this.body.setAngularDamping(angular);
   }
-
   lockTranslation(x: boolean, y: boolean, z: boolean) {
     this.body.setEnabledTranslations(x, y, z, true);
   }
-
   lockRotation(x: boolean, y: boolean, z: boolean) {
     this.body.setEnabledRotations(x, y, z, true);
   }
-
   setSensor(v: boolean) {
     this.collider.setSensor(v);
   }
-
   isSensor() {
     return this.collider.isSensor();
+  }
+  setGravityScale(f:number) {
+    return this.body.setGravityScale(f, true);
+  }
+  lookAt(target: Vec3, up: {x:0, y:1, z:0}) {
+    const pos = toVec3(this.getPosition());
+    const eye = toVec3(target);
+    const m = new THREE.Matrix4().lookAt(eye, pos, toVec3(up));
+    const q = new THREE.Quaternion().setFromRotationMatrix(m);
+    this.setRotation(q);
+  }
+  face(direction: Vec3) {
+    this.setRotation(new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      direction
+    ));
+  }
+}
+function lerp(a:Vec3, b:Vec3, t:number):Vec3 {
+  return {
+    x: a.x + (b.x - a.x) * t, 
+    y: a.y + (b.y - a.y) * t,
+    z: a.z + (b.z - a.z) * t
+  };
+}
+export class PhysicController {
+  currentAction?: () => void;
+  constructor(private pb:Physic) {}
+  offset(o:Vec3):Vec3 {
+    const v = this.pb.getPosition();
+    return {
+      x: v.x + o.x,
+      y: v.y + o.y,
+      z: v.z + o.z
+    };
+  }
+  moveTo(pos: Vec3, options?: {} & {
+    lerp?:true,
+    time: (t:number) => number,
+    duration: number
+  }):PhysicController {
+    if(!options?.lerp) this.pb.setPosition(pos);
+    else {
+      this.currentAction?.();
+      let elapsed = 0;
+      const origin = this.pb.getPosition();
+      const resolve = Lifecycle.onUpdate(() => {
+        this.pb.setVelocity(vec3(0,0,0));
+        elapsed += Time.delta;
+        let t = elapsed / options.duration;
+        if(t > 1) t = 1;
+        this.pb.setPosition(lerp(origin, pos, options.time(t)));
+        if(t === 1) resolve();
+      });
+      this.currentAction = resolve;
+    }
+    return this
+  }
+  launch(dir: Vec3, options: {} & {
+    duration: number,
+    speed?: number,
+    keepVelocity?: boolean
+  }):PhysicController {
+    this.currentAction?.();
+    let elapsed = 0;
+    const speed = options.speed ?? 1;
+    const moveVec = {
+      x: dir.x * speed,
+      y: dir.y * speed,
+      z: dir.z * speed
+    };
+    const resolve = Lifecycle.onUpdate(() => {
+      this.pb.setVelocity(vec3(0,0,0));
+      this.pb.addPosition({
+        x: moveVec.x * Time.delta,
+        y: moveVec.y * Time.delta,
+        z: moveVec.z * Time.delta
+      });
+      elapsed += Time.delta;
+      if(elapsed > options.duration) {
+        if(options.speed) this.pb.setVelocity(moveVec);
+        resolve();
+      }
+    });
+    this.currentAction = resolve;
+    return this;
+  }
+  freeze(duration:number) {
+    const origin = this.pb.getPosition();
+    const resolve = Lifecycle.onUpdate(() => {
+      this.pb.setVelocity(vec3(0,0,0));
+      this.pb.setPosition(origin);
+    });
+    Lifecycle.delay(resolve, duration);
   }
 }

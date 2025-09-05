@@ -9,6 +9,25 @@ export const UNIFORMS = {
   time: { value: 0 },
   delta: { value: 0}
 };
+export const Time = {
+  now: 0,
+  delta: 0,
+}
+export const TimeFunction:Record<string, (t:number) => number> = {
+  Linear: (t) => t,
+  EaseOut: (t) => Math.sqrt(t),
+  EaseOutTri: (t) => Math.sqrt(Math.sqrt(t)),
+  EaseIn: (t) => t * t,
+  EaseInTri: (t) => t * t * t,
+  EaseInOut: (t) => {
+    if(t <= 0.5) return 2.0 * t * t; t -= 0.5; return 2.0 * t * (1.0 - t) + 0.5;
+  },
+  EaseOutOvershoot(t: number) {
+    const s = 1.70158; // overshoot amount
+    t -= 1;
+    return t * t * ((s + 1) * t + s) + 1;
+  }
+}
 
 export const renderer = new THREE.WebGLRenderer({
   antialias: true,
@@ -22,8 +41,25 @@ export const camera = new THREE.PerspectiveCamera(110, 1, 0.1, 2000);
 export const NOISE = new (Noise as any).Noise() as Noise;
 
 const stats = new Stats();
-const drawCallDom = document.getElementById("draw-call")!;
-
+const entitiesPanel = stats.addPanel(new Stats.Panel('ENT', '#ff8', '#221'));
+const drawCallsPanel = stats.addPanel(new Stats.Panel('DRW', '#8ff', '#122'));
+export class Delay {
+  private resolve!: () => void;
+  private elapsed:number;
+  constructor(public callback:() => void, public duration:number) {
+    this.elapsed = 0;
+    this.start();
+  }
+  jump() { this.callback(); this.resolve(); }
+  interrupt() { this.resolve(); }
+  reset() { this.elapsed = 0 }
+  start() {
+    this.resolve = Lifecycle.onUpdate(() => {
+      this.elapsed += Time.delta;
+      if(this.elapsed > this.duration) this.jump();
+    });
+  }
+}
 // === Lifecycle system ===
 export class Lifecycle {
   private static updateCallbacks = new Set<() => void>();
@@ -49,6 +85,22 @@ export class Lifecycle {
   static clearAll() {
     this.updateCallbacks.clear();
     this.renderCallbacks.clear();
+  }
+  /**@param duration - seconds */
+  static delay(callback:() => void, duration:number):Delay {
+    let elapsed = 0;
+    const resolve = Lifecycle.onUpdate(() => {
+      elapsed += Time.delta;
+      if(elapsed > duration) {
+        callback();
+        resolve();
+      }
+    });
+    return new Delay(callback, duration);
+  }
+  /**@param duration - seconds */
+  static halt(duration:number):Promise<void> {
+    return new Promise(r => Lifecycle.delay(r, duration));
   }
 }
 
@@ -77,36 +129,36 @@ async function run() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
-    UNIFORMS.time.value = performance.now();
+    UNIFORMS.time.value = performance.now() / 1000;
   }
 });
 const fps = 60;
 function render() {
-  const now = performance.now();
-  const dt = (now - UNIFORMS.time.value) / 1000;
-  if (dt < 1 / fps) {
-    requestAnimationFrame(render);
-    return;
-  }
+  const now = performance.now() / 1000;
+  const dt = now - UNIFORMS.time.value;
+  //if (dt < 1 / fps) return requestAnimationFrame(render);
   UNIFORMS.delta.value = dt;
-
+  Time.delta = dt;
+  
   UNIFORMS.time.value = now;
+  Time.now = now;
 
+  
   stats.begin();
-
   Input.update();
   System.update(dt);
   
   Lifecycle.runUpdate();
   world.step();
-
-
+  
+  
   System.render();
   Lifecycle.runRender();
   renderer.render(scene, camera);
-
   stats.end();
-  drawCallDom.innerText = `${renderer.info.render.calls}`;
+
+  entitiesPanel.update(System.entities.size, 500); // (value, maxValue for graph)
+  drawCallsPanel.update(renderer.info.render.calls, 1000);
   requestAnimationFrame(render);
 }
 

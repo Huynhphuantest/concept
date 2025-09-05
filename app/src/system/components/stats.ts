@@ -18,7 +18,7 @@ class Stat extends EventTarget {
   updateDOM() {
     if(!this.dom) return;
     this.dom.style.setProperty("--percentage", `${(this.current/this.max)*100}%`);
-    this.dom.style.setProperty("--text", `"${this.current}/${this.max}"`);
+    this.dom.style.setProperty("--text", `"${Math.round(this.current)}/${this.max}"`);
   }
 }
 

@@ -4,13 +4,24 @@ import { type Entity } from "../ECS";
 const skills:Skill[] = [];
 Lifecycle.onUpdate(() => { skills.forEach(e => e.update()) })
 export class Skill<Args extends any[] = any[]> {
-    last: number = 0;
-    constructor(
-        public cooldown: number,
-        public max: number = 1,
-        public stock: number = max,
-        protected usage: (entity:Entity, ...args:Args) => void
-    ) { skills.push(this) }
+    last: number;
+    cooldown: number;
+    max: number;
+    stock: number;
+    protected usage: (entity:Entity, ...args:Args) => void;
+    constructor({cooldown, max, stock, usage}: {
+        cooldown: number,
+        max?: number,
+        stock?: number,
+        usage: (entity:Entity, ...args:Args) => void
+    }) { 
+        this.cooldown = cooldown;
+        this.max = max ?? 1;
+        this.stock = stock ?? this.max;
+        this.usage = usage;
+        this.last = 0;
+        skills.push(this)
+    }
     update(): void {
         const now = UNIFORMS.time.value;
         if (this.stock >= this.max) { this.last = now; return; }

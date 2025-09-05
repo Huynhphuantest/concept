@@ -17,7 +17,7 @@ export class Component extends EventTarget {
 type ComponentMap = Map<Function, Component>;
 
 export class System {
-  private static entities = new Map<Entity, ComponentMap>();
+  public static entities = new Map<Entity, ComponentMap>();
   private static nextId = 0;
 
   static create(): Entity {
@@ -68,7 +68,7 @@ export class System {
 
   static getComponent<T extends Component>(entity: Entity, Comp: new (...args:any[]) => T): T {
     const comp = this.entities.get(entity)?.get(Comp);
-    if(!comp) throw console.error(Error("Component "+Comp+" not found for entity:"+entity));
+    if(!comp) throw Error("Component "+Comp+" not found for entity:"+entity);
     return comp as T;
   }
 

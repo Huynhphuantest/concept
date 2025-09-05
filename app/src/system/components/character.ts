@@ -2,9 +2,9 @@ import * as RAPIER from '@dimforge/rapier3d';
 import { Component, System, type Entity, type EntityWith } from "../ECS";
 import { Health, Stamina, Will } from "./stats";
 import { Skill } from "./skill";
-import { Physic, Transform } from "./core";
-import { Vector3, Quaternion, Euler } from "three";
-import { world } from '../../main';
+import { Physic, PhysicController, Transform } from "./core";
+import { Vector3, Quaternion } from "three";
+import { camera, Lifecycle, scene, TimeFunction, world } from '../../main';
 import { lerp, toVec3, vec3 } from '../../util';
 import { allHurtboxes, Hitbox } from '../Collider';
 import { Visualizer } from '../Visualizer';
@@ -37,14 +37,17 @@ const impactParticle = new Particle(
 );
 class DashSkill extends Skill {
   constructor(cooldown:number, speed:number) {
-    super(cooldown, 1, 1, (entity:Entity, dir:Vector3) => {
-      System.getComponent(entity, Physic).setVelocity(
-        dir.clone().multiplyScalar(speed)
-      );
+    super({cooldown, max: 1, usage:(entity:Entity, dir:Vector3) => {
+      const controller = new PhysicController(System.getComponent(entity, Physic));
+      controller.moveTo(controller.offset(dir.clone().multiplyScalar(speed)), {
+        lerp:true,
+        duration:0.25,
+        time: TimeFunction.EaseInOut,
+      });
       const character = System.getComponent(entity, Character);
       character.isRuning = true;
       character.speed = character.runSpeed;
-    });
+    }});
   }
 }
 const isGrounded = (entity:Entity) => {
@@ -70,26 +73,42 @@ const isGrounded = (entity:Entity) => {
 }
 class JumpSkill extends Skill {
   constructor(cooldown:number, strength:number) {
-    super(cooldown, 1, 1, (entity:Entity) => {
+    super({cooldown, max:1, usage: (entity:Entity) => {
       if(!isGrounded(entity)) {
         this.reset();
         return;
       };
       System.getComponent(entity, Physic).addVelocity(vec3(
-        0,
-        strength,
-        0
+        0, strength, 0
       ));
-    });
+    }});
   }
 }
-type StatusKey =
-  | 'stunned'
-  | 'debounced'
-  | 'iframe'
-  | 'rooted'
-  | 'silenced'
-  | 'casting';
+type StatusKey = 'stun' | 'debounce' | 'invincible' | 'root' | 'casting' | 'mute'
+class Status {
+  private values: Record<StatusKey, number> = {
+    stun: 0,
+    debounce: 0,
+    invincible: 0,
+    root: 0,
+    casting: 0,
+    mute: 0
+  };
+  decay(dt: number) {
+    for (const key in this.values) {
+      this.values[key as StatusKey] = Math.max(0, this.values[key as StatusKey] - dt);
+    }
+  }
+  get(key: StatusKey) {
+    return this.values[key];
+  }
+  set(key: StatusKey, value: number) {
+    this.values[key] = value;
+  }
+  max(key: StatusKey, value:number) {
+    this.values[key] = Math.max(this.values[key], value);
+  }
+}
 export class Character extends Component {
   static override requires = [Transform, Physic];
   transform!: Transform;
@@ -102,29 +121,22 @@ export class Character extends Component {
   public health: Health;
   public stamina: Stamina;
   public will: Will;
-  public defense: number = 70;
-  public attackPower: number = 1;
+  public defense: number = 120;
+  public attackPower: number = 99;
   
   public isMoving = false;
   public isRuning: boolean = false;
 
   public baseSpeed: number = 60;
-  public runSpeed: number = 120;
+  public runSpeed: number = 100;
   public speed: number = 50;
   public accelerateSpeed = 0.8;
   public deaccelerateSpeed = 3;
 
   public lmbCount = 0;
-  public lmbMax = Infinity
+  public lmbMax = 5
 
-  public status: Record<StatusKey, number> = {
-    stunned: 0,
-    debounced: 0,
-    iframe: 0,
-    rooted: 0,
-    silenced: 0,
-    casting: 0,
-  };
+  public status = new Status();
 
   public dashSkill: DashSkill;
   public jumpSkill: JumpSkill;
@@ -152,8 +164,8 @@ export class Character extends Component {
     this.runSpeed = this.baseSpeed * 1.5; //
     if (opts?.attack) this.attackPower = opts.attack;
 
-    this.dashSkill = new DashSkill(750, 90);
-    this.jumpSkill = new JumpSkill(100, 40);
+    this.dashSkill = new DashSkill(0.4, 15);
+    this.jumpSkill = new JumpSkill(0.5, 40);
   }
 
   onStart(): void {
@@ -165,7 +177,7 @@ export class Character extends Component {
     this.pb.body.setEnabledRotations(false, true, false, true);
   }
   onUpdate(dt:number): void {
-    this.decayStatuses(dt);
+    this.status.decay(dt);
     if(this.pb.getVelocity().y < 0) {
       this.pb.addVelocity(vec3(0, -5, 0));
     }
@@ -177,11 +189,6 @@ export class Character extends Component {
     } else this.speed = lerp(this.speed, this.baseSpeed, this.deaccelerateSpeed * dt);
     this.isMoving = false;
   }
-  decayStatuses(dt:number): void {
-    for (const key in this.status) {
-      this.status[key as StatusKey] = Math.max(0, this.status[key as StatusKey] - dt);
-    }
-  }
   move(dir: Vector3, mul = 1, blend = 0.1) {
     if(!this.canMove()) return;
     const s = this.speed * mul;
@@ -192,10 +199,10 @@ export class Character extends Component {
     this.isMoving = true;
   }
   dash(dir: Vector3) {
-    this.dashSkill.activate(this.entity, dir);
+    if(this.canMove()) this.dashSkill.activate(this.entity, dir);
   }
   jump() {
-    this.jumpSkill.activate(this.entity);
+    if(this.canMove()) this.jumpSkill.activate(this.entity);
   }
   lookAtDirection(dir: Vector3) {
     const targetQuat = new Quaternion().setFromUnitVectors(
@@ -210,15 +217,11 @@ export class Character extends Component {
     this.lookAtDirection(dir);
   }
   hurt(damage: number) {
-    const effective = Math.max(0, damage - this.defense);
+    const effective = damage * (1 / (1 + this.defense))
     this.health.sub(effective);
   }
-  useSkill(name: string): boolean {
-    const set = this.skills[name];
-    if (!set || set.length === 0) return false;
-    for (const s of set) {
-      if (s.activate(this.entity)) return true;
-    }
+  useSkill(n: number):boolean {
+    if(this.canAct()) return Object.values(this.skills)[0][n].activate(this.entity);
     return false;
   }
   lockon(entity: EntityWith<[typeof Transform]>) {
@@ -227,14 +230,17 @@ export class Character extends Component {
   lockoff() {
     this.locked = null;
   }
-  getFacing(): Vector3 {
+  getTarget(): Vector3 {
     if (this.locked === null) {
-      const yawOnly = new Quaternion().setFromEuler(
-        new Euler(0, new Euler().setFromQuaternion(this.transform.quaternion, "YXZ").y, 0)
-      );
-      return new Vector3(0, 0, 1).applyQuaternion(yawOnly).normalize().add(this.transform.position);
+      const cameraDirection = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+      const intersections = new THREE.Raycaster(
+        camera.position,
+        cameraDirection
+      ).intersectObjects(scene.children);
+      if(intersections.length === 0) return cameraDirection.multiplyScalar(camera.far);
+      else return intersections[0].point;
     } else {
-      return System.getComponent(this.locked, Transform).position;
+      return System.getComponent(this.locked, Transform).position.clone();
     }
   }
   die() {
@@ -243,26 +249,28 @@ export class Character extends Component {
   }
   canMove() {
     return !(
-      this.status.debounced > 0 ||
-      this.status.stunned > 0 ||
-      this.status.casting > 0 ||
-      this.status.rooted > 0
+      this.status.get('debounce') > 0 ||
+      this.status.get('stun') > 0 ||
+      this.status.get('root') > 0
     )
   }
   canAct() {
     return !(
-      this.status.debounced > 0 ||
-      this.status.stunned > 0 ||
-      this.status.silenced > 0 ||
-      this.status.casting > 0
+      this.status.get('debounce') > 0 ||
+      this.status.get('stun') > 0 ||
+      this.status.get('mute') > 0 ||
+      this.status.get('casting') > 0
     )
   }
   lmb() {
     if(!this.canAct()) return;
-    this.status.debounced += 0.125;
+    const selfController = new PhysicController(this.pb);
+    this.status.max('debounce', 0.25);
     const quat = this.pb.getRotation();
     const dir = new Vector3(0,0,1).applyQuaternion(quat);
-    this.pb.addVelocity(dir.clone().multiplyScalar(40));
+    selfController.moveTo(selfController.offset(dir.clone().multiplyScalar(0.3)), {
+      lerp:true, time: TimeFunction.EaseIn, duration: 0.2
+    });
     const hitbox = new Hitbox(
       RAPIER.ColliderDesc.cuboid(1.5,2,2),
       undefined,
@@ -270,39 +278,43 @@ export class Character extends Component {
     );
     hitbox.collider.setRotation(quat);
     hitbox.collider.setTranslation(
-      toVec3(
-        this.pb.getPosition()
-      ).add(
-        dir.clone().multiplyScalar(3)
+      toVec3(this.pb.getPosition())
+      .add(
+        dir.clone().multiplyScalar(4)
       )
     );
     const visualizer = new Visualizer(hitbox.collider);
     hitbox.onHit((e) => {
       if(e.hit > 1) return;
       if(e.data.type !== 'Character') return;
-      System.getComponent(e.data.character.entity, Physic).addVelocity(
-        dir.clone().multiplyScalar(40)
-      );
+      if(e.data.character === this) return;
+      e.data.character.hurt(this.attackPower);
+      const targetController = new PhysicController(e.data.character.pb);
+      targetController.moveTo(hitbox.collider.translation(), {
+        lerp: true, time: TimeFunction.EaseIn, duration: 0.15
+      });
       impactParticlePosition = System.getComponent(e.data.character.entity, Transform).position;
       for(let i = 0; i < 64; i++) impactParticle.start({lifetime: 2});
       if(this.lmbCount === this.lmbMax - 1) {
-        System.getComponent(e.data.character.entity, Physic).addVelocity(
-          dir.clone().multiplyScalar(150)
-        );
-        e.data.character.status.stunned += 5;
-        this.status.debounced += 0.3;
+        targetController.launch(dir, {
+          duration: 1,
+          speed: 45,
+          keepVelocity: true
+        })
+        e.data.character.status.max('stun', 2);
+        this.status.max('debounce', 0.3);
         this.lmbCount = 0;
       }
-      e.data.character.status.stunned += 0.5;
+      e.data.character.status.max('stun', 0.6);
     });
-    setTimeout(() => {
+    Lifecycle.delay(() => {
       visualizer.destroy(),
       hitbox.destroy();
-    }, 250);
+    }, 0.25);
     this.lmbCount++;
     if(this.lmbCount === this.lmbMax) {
       this.lmbCount = 0;
-      this.status.debounced += 0.25;
+      this.status.max('debounce', 0.45);
     }
   }
 }
